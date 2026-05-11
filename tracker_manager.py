@@ -319,7 +319,7 @@ class Spinner:
         self.spinning = False
         if self.thread:
             self.thread.join()
-        print(f"\r{Colors.GREEN}[OK] Done{Colors.RESET}   ", flush=True)
+        print("\r\033[K", end="", flush=True)
 
     def _spin(self):
         idx = 0
@@ -342,8 +342,8 @@ class ProgressBar:
             self.current = current
             percent = self.current / self.total if self.total > 0 else 0
             filled = int(self.width * percent)
-            bar = f"{Colors.BRIGHT_CYAN}{BLOCK * filled}{Colors.BRIGHT_BLACK}{DOTTED * (self.width - filled)}{Colors.RESET}"
-            print(f"\r{self.prefix} {bar} {Colors.BRIGHT_YELLOW}{percent*100:5.1f}%{Colors.RESET} [{self.current}/{self.total}]", end="")
+            bar = f"{Colors.CYAN}{BLOCK * filled}{DOTTED * (self.width - filled)}{Colors.RESET}"
+            print(f"\r{self.prefix} {bar} {percent*100:5.1f}% [{self.current}/{self.total}]", end="")
             if self.current == self.total:
                 print()
 
@@ -379,23 +379,23 @@ class QBittorrentChecker:
             response = self.session.post(login_url, data=login_data)
             spinner.stop()
             if response.status_code == 403:
-                print(f"{Colors.RED}[ERROR] [{self.instance_name}] Invalid credentials{Colors.RESET}")
+                print(f"{Colors.RED}Invalid credentials for {self.instance_name}{Colors.RESET}")
                 return False
             if response.status_code == 200 or "Fails" not in response.text:
                 self.connected = True
                 self.auth_cookies = self.session.cookies.get_dict()
-                print(f"{Colors.GREEN}[OK] [{self.instance_name}] Connected {Colors.BRIGHT_WHITE}{self.base_url}{Colors.RESET}")
+                print(f"{Colors.GREEN}Connected to {self.instance_name} ({self.base_url}){Colors.RESET}")
                 return True
             else:
-                print(f"{Colors.RED}[ERROR] [{self.instance_name}] Login failed{Colors.RESET}")
+                print(f"{Colors.RED}Login failed for {self.instance_name}{Colors.RESET}")
                 return False
         except requests.exceptions.ConnectionError:
             spinner.stop()
-            print(f"{Colors.RED}[ERROR] [{self.instance_name}] Cannot connect: {self.base_url}{Colors.RESET}")
+            print(f"{Colors.RED}Cannot connect to {self.instance_name}: {self.base_url}{Colors.RESET}")
             return False
         except Exception as e:
             spinner.stop()
-            print(f"{Colors.RED}[ERROR] [{self.instance_name}] Exception: {e}{Colors.RESET}")
+            print(f"{Colors.RED}Connection error for {self.instance_name}: {e}{Colors.RESET}")
             return False
 
     def _make_session(self) -> requests.Session:
@@ -539,14 +539,14 @@ class QBittorrentChecker:
 
     def check_tracker_status(self, torrents: List[Dict] = None, force: bool = False) -> List[Dict]:
         if not self.connected:
-            print(f"{Colors.RED}[ERROR] [{self.instance_name}] Not connected{Colors.RESET}")
+            print(f"{Colors.RED}Not connected: {self.instance_name}{Colors.RESET}")
             return []
 
         if torrents is None:
             torrents = self.get_torrents()
 
         if not torrents:
-            print(f"{Colors.YELLOW}[WARN] [{self.instance_name}] No torrents found{Colors.RESET}")
+            print(f"No torrents found on {self.instance_name}")
             return []
 
         self.stats["total"] = len(torrents)
@@ -564,18 +564,17 @@ class QBittorrentChecker:
 
         n = len(to_check)
         if n == 0:
-            print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] All {self.stats['total']} torrents skipped (cached OK){Colors.RESET}")
-            print()
-            self._print_summary()
+            print(f"All {self.stats['total']} torrents on {self.instance_name} skipped (cached OK)")
             return []
 
-        print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] {self.stats['total']} torrents ({n} to check, {self.stats['skipped']} skipped, {MAX_WORKERS} workers, {REQUEST_DELAY*1000:.0f}ms delay){Colors.RESET}")
+        skipped = self.stats['skipped']
+        print(f"Scanning {n} of {self.stats['total']} torrents on {self.instance_name} ({MAX_WORKERS} workers, {REQUEST_DELAY*1000:.0f}ms delay)" + (f", {skipped} skipped" if skipped else ""))
 
         chunk_size = max(1, n // MAX_WORKERS + 1)
         chunks = [to_check[i:i+chunk_size] for i in range(0, n, chunk_size)]
 
         problematic = []
-        progress = ProgressBar(n, prefix=f"{Colors.BRIGHT_BLUE}[{self.instance_name}]{Colors.RESET}")
+        progress = ProgressBar(n, prefix=f"{self.instance_name}")
 
         with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
             futures = [pool.submit(self._check_batch, c) for c in chunks]
@@ -605,20 +604,19 @@ class QBittorrentChecker:
                     else:
                         self.stats["normal"] += 1
 
-        print()
         self._print_summary()
         return problematic
 
     def _print_summary(self):
         elapsed = (datetime.now() - self.stats["start_time"]).total_seconds()
         rate = self.stats["checked"] / elapsed if elapsed > 0 else 0
-        print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] Report{Colors.RESET}")
-        print(f"  {Colors.BRIGHT_YELLOW}Total{Colors.RESET}: {self.stats['total']}")
-        if self.stats["skipped"] > 0:
-            print(f"  {Colors.BRIGHT_BLUE}Skipped (cached normal){Colors.RESET}: {self.stats['skipped']}")
-        print(f"  {Colors.BRIGHT_GREEN}Normal{Colors.RESET}: {self.stats['normal']}")
-        print(f"  {Colors.BRIGHT_RED}Issues{Colors.RESET}: {self.stats['problematic']}")
-        print(f"  {Colors.BRIGHT_MAGENTA}Time{Colors.RESET}: {elapsed:.2f}s  ({Colors.BRIGHT_CYAN}{rate:.0f} t/s{Colors.RESET})")
+        parts = [f"Result: {self.stats['normal']} normal"]
+        if self.stats["problematic"]:
+            parts.append(f"{self.stats['problematic']} issues")
+        else:
+            parts.append("0 issues")
+        parts.append(f"({elapsed:.2f}s, {rate:.0f} t/s)")
+        print("  " + ", ".join(parts))
 
     @staticmethod
     def _fmt_size(size: int) -> str:
@@ -630,25 +628,23 @@ class QBittorrentChecker:
 
     def print_problematic_torrents(self, problematic: List[Dict]):
         if not problematic:
-            print(f"\n{Colors.BRIGHT_GREEN}[{self.instance_name}] All torrents healthy{Colors.RESET}")
             return
-        print(f"\n{Colors.BRIGHT_RED}[{self.instance_name}] {len(problematic)} problematic torrents{Colors.RESET}\n")
+        p = len(problematic)
+        print(f"")
         for i, t in enumerate(problematic, 1):
-            sc = Colors.BRIGHT_RED if t["progress"] < 100 else Colors.BRIGHT_YELLOW
-            print(f"{Colors.BRIGHT_CYAN}[{i:2d}]{Colors.RESET} {Colors.BRIGHT_WHITE}{t['name'][:55]}{Colors.RESET}")
-            print(f"      {Colors.DIM}|{Colors.RESET} Size: {self._fmt_size(t['size'])}  Progress: {sc}{t['progress']:.1f}%{Colors.RESET}  State: {t['state']}")
+            print(f"  [{i}] {t['name'][:60]}")
+            print(f"       Size: {self._fmt_size(t['size'])}  Progress: {t['progress']:.1f}%  State: {t['state']}")
             if t.get("problematic_trackers"):
                 for tr in t["problematic_trackers"][:3]:
-                    short = tr["url"][:50]
                     reason = tr.get("message") or f"status={tr['status']}"
-                    print(f"        {Colors.RED}x{Colors.RESET} {short}  {Colors.DIM}({reason}){Colors.RESET}")
+                    print(f"       {tr['url'][:65]}  ({reason})")
             print()
 
     def batch_delete_torrents(self, hashes: List[str], delete_files: bool = False):
-        action = "Delete files" if delete_files else "Keep files"
-        print(f"\n{Colors.YELLOW}[{self.instance_name}] Deleting {len(hashes)} torrents ({action}){Colors.RESET}")
+        action = "with files" if delete_files else "keep files"
+        print(f"Deleting {len(hashes)} torrents ({action}) on {self.instance_name}")
         success = 0
-        pb = ProgressBar(len(hashes), prefix=f"{Colors.BRIGHT_RED}Delete{Colors.RESET}")
+        pb = ProgressBar(len(hashes), prefix=f"Delete")
         for i, h in enumerate(hashes, 1):
             pb.update(i)
             if self.delete_torrent(h, delete_files):
@@ -658,7 +654,7 @@ class QBittorrentChecker:
                     if t:
                         self.db.update_torrent_status(t["id"], "deleted")
             time.sleep(self.batch_delay)
-        print(f"\n{Colors.GREEN}[OK] [{self.instance_name}] Deleted: {success}/{len(hashes)}{Colors.RESET}")
+        print(f"  Deleted {success}/{len(hashes)}")
 
 
 # ============================================================================
@@ -666,81 +662,75 @@ class QBittorrentChecker:
 # ============================================================================
 
 def manage_instances(db: Database):
-    h = Icon.HORIZONTAL
-    v = Icon.VERTICAL
-    w = 60
     while True:
         instances = db.list_instances()
         print()
-        print(f"{Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  Instance Manager")
-        print(f"{Colors.BRIGHT_CYAN}{Icon.LT}{h*w}{Icon.RT}{Colors.RESET}")
+        print("-- Instance Manager --")
         if instances:
             for inst in instances:
                 masked = "*" * len(inst["password"]) if inst["password"] else "(none)"
-                print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}[{inst['id']}]{Colors.RESET} {inst['name']}  {Colors.DIM}{inst['host']}:{inst['port']}  user:{inst['username']}  pass:{masked}{Colors.RESET}")
+                print(f"  [{inst['id']}] {inst['name']}  {inst['host']}:{inst['port']}  user:{inst['username']}  pass:{masked}")
         else:
-            print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}(no instances){Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}{Icon.LT}{h*w}{Icon.RT}{Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}1{Colors.RESET} Add instance")
-        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}2{Colors.RESET} Edit instance")
-        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}3{Colors.RESET} Delete instance")
-        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}0{Colors.RESET} Back to menu")
-        print(f"{Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}")
-        choice = input(f"\n{Colors.BRIGHT_CYAN}> {Colors.RESET}Choice: ").strip()
+            print("  (no instances)")
+        print()
+        print("  1. Add instance")
+        print("  2. Edit instance")
+        print("  3. Delete instance")
+        print("  0. Back")
+        choice = input("\nChoice: ").strip()
 
         if choice == "0":
             break
         elif choice == "1":
-            name = input(f"  Name: ").strip()
-            host = input(f"  Host: ").strip() or "localhost"
-            port = int(input(f"  Port [{Colors.DIM}8080{Colors.RESET}]: ").strip() or "8080")
-            user = input(f"  Username: ").strip()
-            pw = getpass.getpass(f"  Password: ")
+            name = input("  Name: ").strip()
+            host = input("  Host: ").strip() or "localhost"
+            port = int(input(f"  Port [8080]: ").strip() or "8080")
+            user = input("  Username: ").strip()
+            pw = getpass.getpass("  Password: ")
             db.save_instance(name, host, port, user, pw)
-            print(f"{Colors.GREEN}[OK] Instance '{name}' added{Colors.RESET}")
+            print(f"  Added '{name}'")
         elif choice == "2":
             if not instances:
                 continue
             try:
-                iid = int(input(f"  Instance ID to edit: ").strip())
+                iid = int(input("  Instance ID to edit: ").strip())
             except ValueError:
                 continue
             inst = db.get_instance(iid)
             if not inst:
-                print(f"{Colors.RED}[ERROR] Not found{Colors.RESET}")
+                print("  Not found")
                 continue
             name = input(f"  Name [{inst['name']}]: ").strip() or inst["name"]
             host = input(f"  Host [{inst['host']}]: ").strip() or inst["host"]
             port = int(input(f"  Port [{inst['port']}]: ").strip() or str(inst["port"]))
             user = input(f"  Username [{inst['username']}]: ").strip() or inst["username"]
-            pw_input = getpass.getpass(f"  Password (blank = keep): ")
+            pw_input = getpass.getpass("  Password (blank = keep): ")
             pw = pw_input if pw_input else inst["password"]
             db.save_instance(name, host, port, user, pw, inst_id=iid)
-            print(f"{Colors.GREEN}[OK] Instance updated{Colors.RESET}")
+            print("  Updated")
         elif choice == "3":
             if not instances:
                 continue
             try:
-                iid = int(input(f"  Instance ID to delete: ").strip())
+                iid = int(input("  Instance ID to delete: ").strip())
             except ValueError:
                 continue
-            confirm = input(f"{Colors.YELLOW}  Confirm? Torrent records will also be deleted [y/N]: {Colors.RESET}").strip().lower()
+            confirm = input("  Confirm? Torrent records will also be deleted [y/N]: ").strip().lower()
             if confirm in ("y", "yes"):
                 db.delete_instance(iid)
-                print(f"{Colors.GREEN}[OK] Deleted{Colors.RESET}")
+                print("  Deleted")
 
 
 def choose_instances(db: Database) -> List[Dict]:
     instances = db.list_instances()
     if not instances:
-        print(f"{Colors.YELLOW}[WARN] No instances configured. Add one first.{Colors.RESET}")
+        print("No instances configured. Add one first.")
         return []
-    print(f"\n{Colors.BRIGHT_CYAN}Select instances to check:{Colors.RESET}")
+    print("\nSelect instances:")
     for inst in instances:
-        print(f"  {Colors.BRIGHT_GREEN}[{inst['id']}]{Colors.RESET} {inst['name']} ({inst['host']}:{inst['port']})")
-    print(f"  {Colors.BRIGHT_GREEN}[a]{Colors.RESET} All")
-    sel = input(f"\n{Colors.BRIGHT_CYAN}> {Colors.RESET}Select (ID / a): ").strip().lower()
+        print(f"  [{inst['id']}] {inst['name']} ({inst['host']}:{inst['port']})")
+    print("  [a] All")
+    sel = input("\nSelect (ID / a): ").strip().lower()
     if sel == "a":
         return instances
     try:
@@ -758,27 +748,19 @@ def choose_instances(db: Database) -> List[Dict]:
 def show_dashboard(db: Database):
     instances = db.list_instances()
     if not instances:
-        print(f"{Colors.YELLOW}[WARN] No instances{Colors.RESET}")
+        print("No instances configured")
         return
-    h = Icon.HORIZONTAL
-    v = Icon.VERTICAL
-    w = 60
     total_torrents = 0
     print()
-    print(f"{Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  Global Stats")
-    print(f"{Colors.BRIGHT_CYAN}{Icon.LT}{h*w}{Icon.RT}{Colors.RESET}")
+    print("-- Global Stats --")
     for inst in instances:
         counts = db.count_torrents_by_status(inst["id"])
         sub = sum(counts.values())
         total_torrents += sub
-        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_WHITE}{inst['name']}{Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}    Normal: {counts['normal']}  Issues: {counts['problematic']}  Unknown: {counts['unknown']}  Deleted: {counts['deleted']}  (total: {sub})")
-    print(f"{Colors.BRIGHT_CYAN}{Icon.LT}{h*w}{Icon.RT}{Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  DB path: {Colors.DIM}{db.db_path}{Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  Total torrents tracked: {total_torrents}")
-    print(f"{Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}")
-    input(f"\n{Colors.DIM}Press Enter to return...{Colors.RESET}")
+        print(f"  {inst['name']}: {counts['normal']} normal, {counts['problematic']} issues, {counts['unknown']} unknown, {counts['deleted']} deleted (total: {sub})")
+    print(f"  DB: {db.db_path}")
+    print(f"  Total torrents tracked: {total_torrents}")
+    input("\nPress Enter to return...")
 
 
 # ============================================================================
@@ -790,11 +772,11 @@ def print_banner():
     v = Icon.VERTICAL
     w = 70
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    ts = f"{now}"
     print(f"""
 {Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_MAGENTA}TRACKER GUARDIAN v4.0.1{Colors.RESET} - Multi-Instance Persistent Scanner
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}Multi-instance | SQLite | Incremental skip | Concurrent scan{Colors.RESET}
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}{now}{Colors.RESET}
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  TRACKER GUARDIAN v4.0.1  -  Multi-Instance Tracker Scanner
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {ts}
 {Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}
 """)
 
@@ -809,22 +791,17 @@ def main_menu(db: Database):
 
         print_banner()
         menu = f"""
-{Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  Main Menu
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}{'-'*44}{Colors.RESET}
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}1{Colors.RESET} Check tracker (incremental)
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}2{Colors.RESET} Force check (ignore cache)
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}3{Colors.RESET} Manage instances ({inst_count})
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}4{Colors.RESET} Global stats
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}{'-'*44}{Colors.RESET}
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}0{Colors.RESET} Exit
-{Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}
+  {Colors.BRIGHT_GREEN}1{Colors.RESET} Check tracker (incremental)
+  {Colors.BRIGHT_GREEN}2{Colors.RESET} Force check (ignore cache)
+  {Colors.BRIGHT_GREEN}3{Colors.RESET} Manage instances ({inst_count})
+  {Colors.BRIGHT_GREEN}4{Colors.RESET} Global stats
+  {Colors.BRIGHT_GREEN}0{Colors.RESET} Exit
 """
         print(menu)
-        choice = input(f"{Colors.BRIGHT_CYAN}> {Colors.RESET}Choice [0-4]: ").strip()
+        choice = input(f"> Choice [0-4]: ").strip()
 
         if choice == "0":
-            print(f"\n{Colors.BRIGHT_MAGENTA}Thanks for using TRACKER GUARDIAN v4.0.1!{Colors.RESET}\n")
+            print(f"\nExiting.\n")
             break
 
         elif choice in ("1", "2"):
@@ -833,6 +810,8 @@ def main_menu(db: Database):
                 continue
             force = (choice == "2")
             for inst in selected:
+                hline = Colors.CYAN + "\u2501" * 70 + Colors.RESET
+                print(f"\n{hline}")
                 checker = QBittorrentChecker(inst, db)
                 if not checker.connect():
                     continue
@@ -850,7 +829,7 @@ def main_menu(db: Database):
                     if action == "1":
                         for t in problematic:
                             checker.force_reannounce(t["hash"])
-                        print(f"  {Colors.GREEN}[OK] Re-announced{Colors.RESET}")
+                        print(f"  Re-announced")
                     elif action == "2":
                         checker.batch_delete_torrents([t["hash"] for t in problematic], delete_files=False)
                     elif action == "3":
@@ -858,12 +837,12 @@ def main_menu(db: Database):
                     elif action == "4":
                         for t in problematic:
                             checker.pause_torrent(t["hash"])
-                        print(f"  {Colors.YELLOW}Paused{Colors.RESET}")
+                        print(f"  Paused")
                     elif action == "5":
                         for t in problematic:
                             checker.resume_torrent(t["hash"])
-                        print(f"  {Colors.GREEN}Resumed{Colors.RESET}")
-            input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
+                        print(f"  Resumed")
+            input(f"\nPress Enter to continue...")
 
         elif choice == "3":
             manage_instances(db)
@@ -877,9 +856,9 @@ def main():
     try:
         main_menu(db)
     except KeyboardInterrupt:
-        print(f"\n\n{Colors.YELLOW}[WARN] Interrupted{Colors.RESET}")
+        print("\nInterrupted.")
     except Exception as e:
-        print(f"\n{Colors.RED}[ERROR] {e}{Colors.RESET}")
+        print(f"\nError: {e}")
     finally:
         db.close()
 
