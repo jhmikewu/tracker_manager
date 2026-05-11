@@ -486,6 +486,7 @@ class QBittorrentChecker:
                 continue
 
             working = 0
+            failing = 0
             problematic_trackers = []
             real_total = 0
 
@@ -496,12 +497,16 @@ class QBittorrentChecker:
                 real_total += 1
                 status = tracker.get("status", -1)
                 msg = tracker.get("msg", "")
-                if status == 2:
+
+                if status == 2 or status == 4:
                     working += 1
+                elif status == 1 or status == 3:
+                    pass
                 else:
+                    failing += 1
                     problematic_trackers.append({"url": url, "status": status, "message": msg})
 
-            if working > 0:
+            if working > 0 or failing == 0:
                 results.append({"hash": torrent_hash, "name": torrent_name, "is_problematic": False,
                                "progress": torrent.get("progress", 0) * 100, "state": torrent.get("state", ""),
                                "size": torrent.get("size", 0), "tracker_count": real_total})
