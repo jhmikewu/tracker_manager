@@ -3,8 +3,8 @@
 
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════╗
-║                    Tracker Guardian v4.0 - 多实例持久化版                             ║
-║                Multi-Instance Tracker Guardian System - 赛博朋克版                    ║
+║                    Tracker Guardian v4.0.1 - 多实例持久化版                          ║
+║            Multi-Instance Tracker Guardian System - 赛博朋克版                        ║
 ╚══════════════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -16,16 +16,15 @@ DB_PATH = os.environ.get("GUARDIAN_DB", os.path.join(os.path.dirname(os.path.abs
 try:
     import sqlite3
 except ImportError:
-    print("\n❌ 缺少 sqlite3 模块（应为内置模块）")
-    input("\n按 Enter 键退出...")
+    print("\n[ERROR] sqlite3 not found")
+    input("\nPress Enter to exit...")
     sys.exit(1)
 
 try:
     import requests
 except ImportError:
-    print("\n❌ 缺少 requests 模块")
-    print("    pip install requests")
-    input("\n按 Enter 键退出...")
+    print("\n[ERROR] requests not found. Install: pip install requests")
+    input("\nPress Enter to exit...")
     sys.exit(1)
 
 try:
@@ -49,10 +48,10 @@ from urllib.parse import urljoin
 from datetime import datetime
 from enum import Enum
 import getpass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ============================================================================
-# 颜色系统
-# ============================================================================
+BLOCK = chr(0x2588)
+DOTTED = chr(0x2591)
 
 class Colors:
     BLACK = '\033[30m'
@@ -79,46 +78,31 @@ class Colors:
 
 
 class Icon:
-    SUCCESS = "✓"
-    ERROR = "✗"
-    WARNING = "⚠"
-    INFO = "ℹ"
-    ARROW = "→"
-    DOWNLOAD = "⬇"
-    UPLOAD = "⬆"
-    TRASH = "🗑"
-    TAG = "🏷"
-    SETTINGS = "⚙"
-    NETWORK = "🌐"
-    USER = "👤"
-    LOCK = "🔒"
-    FOLDER = "📁"
-    FILE = "📄"
-    SEARCH = "🔍"
-    CHECK = "✔"
-    CROSS = "✘"
-    STAR = "★"
-    BOLT = "⚡"
-    GEAR = "⚙"
-    TERMINAL = "〉"
-    BOX = "▣"
-    PIPE = "│"
-    LINE = "─"
-    TOP_LEFT = "┌"
-    TOP_RIGHT = "┐"
-    BOTTOM_LEFT = "└"
-    BOTTOM_RIGHT = "┘"
-    HORIZONTAL = "─"
-    VERTICAL = "│"
-    LOOP = "🔄"
-    PAUSE = "⏸"
-    RADAR = "📡"
-    SHIELD = "🛡️"
-    CROWN = "👑"
-    ROBOT = "🤖"
-    CHAT = "💬"
-    HDD = "💾"
-    DATABASE = "🗄️"
+    HORIZONTAL = '\u2500'
+    VERTICAL = '\u2502'
+    TL = '\u250c'
+    TR = '\u2510'
+    BL = '\u2514'
+    BR = '\u2518'
+    LT = '\u251c'
+    RT = '\u2524'
+    CHECK = '\u2714'
+    CROSS = '\u2718'
+    STAR = '\u2605'
+    BOLT = '\u26a1'
+    WARNING = '\u26a0'
+    GEAR = '\u2699'
+    TERMINAL = '\u232a'
+
+
+def banner_line(width=70):
+    return Icon.TL + Icon.HORIZONTAL * width + Icon.TR
+
+def banner_mid(width=70):
+    return Icon.LT + Icon.HORIZONTAL * width + Icon.RT
+
+def banner_bot(width=70):
+    return Icon.BL + Icon.HORIZONTAL * width + Icon.BR
 
 
 # ============================================================================
@@ -126,11 +110,12 @@ class Icon:
 # ============================================================================
 
 DEFAULT_FILTER = "all"
-REQUEST_DELAY = 0.1
+REQUEST_DELAY = 0.05
 BATCH_DELETE_DELAY = 0.2
+MAX_WORKERS = 20
 ENABLE_AUTO_TAGGING = True
-NORMAL_TORRENT_TAG = "✅正常"
-PROBLEM_TORRENT_TAG = "⚠️问题"
+NORMAL_TORRENT_TAG = u"\u2705\u6b63\u5e38"
+PROBLEM_TORRENT_TAG = u"\u26a0\ufe0f\u95ee\u9898"
 OVERWRITE_TAGS = False
 KEEP_HISTORY_TAGS = True
 
@@ -163,6 +148,7 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.write_lock = threading.Lock()
         self._init_tables()
 
     def _init_tables(self):
@@ -206,8 +192,6 @@ class Database:
         """)
         self.conn.commit()
 
-    # ── Instances ──
-
     def list_instances(self) -> List[Dict]:
         cur = self.conn.execute("SELECT * FROM instances ORDER BY name")
         return [dict(r) for r in cur.fetchall()]
@@ -218,29 +202,26 @@ class Database:
         return dict(r) if r else None
 
     def save_instance(self, name: str, host: str, port: int, username: str, password: str, inst_id: int = None) -> int:
-        if inst_id:
-            self.conn.execute(
-                "UPDATE instances SET name=?, host=?, port=?, username=?, password=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (name, host, port, username, password, inst_id)
-            )
-        else:
-            cur = self.conn.execute(
-                "INSERT INTO instances (name, host, port, username, password) VALUES (?, ?, ?, ?, ?)",
-                (name, host, port, username, password)
-            )
-            inst_id = cur.lastrowid
-        self.conn.commit()
+        with self.write_lock:
+            if inst_id:
+                self.conn.execute(
+                    "UPDATE instances SET name=?, host=?, port=?, username=?, password=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (name, host, port, username, password, inst_id)
+                )
+            else:
+                cur = self.conn.execute(
+                    "INSERT INTO instances (name, host, port, username, password) VALUES (?, ?, ?, ?, ?)",
+                    (name, host, port, username, password)
+                )
+                inst_id = cur.lastrowid
+            self.conn.commit()
         return inst_id
 
     def delete_instance(self, inst_id: int) -> bool:
-        self.conn.execute("DELETE FROM instances WHERE id = ?", (inst_id,))
-        self.conn.commit()
+        with self.write_lock:
+            self.conn.execute("DELETE FROM instances WHERE id = ?", (inst_id,))
+            self.conn.commit()
         return True
-
-    def get_active_instances(self) -> List[Dict]:
-        return self.list_instances()
-
-    # ── Torrents ──
 
     def get_torrent(self, instance_id: int, torrent_hash: str) -> Optional[Dict]:
         cur = self.conn.execute(
@@ -253,20 +234,23 @@ class Database:
     def upsert_torrent(self, instance_id: int, torrent_hash: str, name: str, status: str,
                        progress: float = 0, state: str = None, save_path: str = None) -> int:
         now = datetime.now().isoformat()
-        existing = self.get_torrent(instance_id, torrent_hash)
-        if existing:
-            self.conn.execute("""
-                UPDATE torrents SET name=?, status=?, progress=?, state=?, save_path=?,
-                    last_seen=?, last_checked=?
-                WHERE id=?
-            """, (name, status, progress, state, save_path, now, now, existing["id"]))
-            return existing["id"]
-        else:
-            cur = self.conn.execute("""
-                INSERT INTO torrents (instance_id, hash, name, status, progress, state, save_path, last_checked)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (instance_id, torrent_hash, name, status, progress, state, save_path, now))
-            return cur.lastrowid
+        with self.write_lock:
+            existing = self.get_torrent(instance_id, torrent_hash)
+            if existing:
+                self.conn.execute("""
+                    UPDATE torrents SET name=?, status=?, progress=?, state=?, save_path=?,
+                        last_seen=?, last_checked=?
+                    WHERE id=?
+                """, (name, status, progress, state, save_path, now, now, existing["id"]))
+                tid = existing["id"]
+            else:
+                cur = self.conn.execute("""
+                    INSERT INTO torrents (instance_id, hash, name, status, progress, state, save_path, last_checked)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (instance_id, torrent_hash, name, status, progress, state, save_path, now))
+                tid = cur.lastrowid
+            self.conn.commit()
+        return tid
 
     def update_torrent_status(self, torrent_id: int, status: str, progress: float = None,
                               state: str = None, save_path: str = None):
@@ -283,8 +267,9 @@ class Database:
             fields.append("save_path=?")
             vals.append(save_path)
         vals.append(torrent_id)
-        self.conn.execute(f"UPDATE torrents SET {', '.join(fields)} WHERE id=?", vals)
-        self.conn.commit()
+        with self.write_lock:
+            self.conn.execute(f"UPDATE torrents SET {', '.join(fields)} WHERE id=?", vals)
+            self.conn.commit()
 
     def count_torrents_by_status(self, instance_id: int = None) -> Dict[str, int]:
         if instance_id:
@@ -302,26 +287,27 @@ class Database:
         return counts
 
     def add_tracker_issue(self, torrent_id: int, tracker_url: str, status_code: int, message: str):
-        self.conn.execute(
-            "INSERT INTO tracker_issues (torrent_id, tracker_url, status_code, message) VALUES (?, ?, ?, ?)",
-            (torrent_id, tracker_url, status_code, message)
-        )
-        self.conn.commit()
+        with self.write_lock:
+            self.conn.execute(
+                "INSERT INTO tracker_issues (torrent_id, tracker_url, status_code, message) VALUES (?, ?, ?, ?)",
+                (torrent_id, tracker_url, status_code, message)
+            )
+            self.conn.commit()
 
     def close(self):
         self.conn.close()
 
 
 # ============================================================================
-# 动画类（沿用）
+# 动画类
 # ============================================================================
 
 class Spinner:
-    def __init__(self, message: str = "处理中"):
+    def __init__(self, message: str = "Processing"):
         self.message = message
         self.spinning = False
         self.thread = None
-        self.frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self.frames = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u280f", "\u280f"]
 
     def start(self):
         self.spinning = True
@@ -333,7 +319,7 @@ class Spinner:
         self.spinning = False
         if self.thread:
             self.thread.join()
-        print(f"\r{Colors.GREEN}{Icon.SUCCESS} 完成{Colors.RESET}   ", flush=True)
+        print(f"\r{Colors.GREEN}[OK] Done{Colors.RESET}   ", flush=True)
 
     def _spin(self):
         idx = 0
@@ -349,15 +335,20 @@ class ProgressBar:
         self.width = width
         self.prefix = prefix
         self.current = 0
+        self._lock = threading.Lock()
 
     def update(self, current: int):
-        self.current = current
-        percent = self.current / self.total if self.total > 0 else 0
-        filled = int(self.width * percent)
-        bar = f"{Colors.BRIGHT_CYAN}{'█' * filled}{Colors.BRIGHT_BLACK}{'░' * (self.width - filled)}{Colors.RESET}"
-        print(f"\r{self.prefix} {bar} {Colors.BRIGHT_YELLOW}{percent*100:5.1f}%{Colors.RESET} [{self.current}/{self.total}]", end="")
-        if self.current == self.total:
-            print()
+        with self._lock:
+            self.current = current
+            percent = self.current / self.total if self.total > 0 else 0
+            filled = int(self.width * percent)
+            bar = f"{Colors.BRIGHT_CYAN}{BLOCK * filled}{Colors.BRIGHT_BLACK}{DOTTED * (self.width - filled)}{Colors.RESET}"
+            print(f"\r{self.prefix} {bar} {Colors.BRIGHT_YELLOW}{percent*100:5.1f}%{Colors.RESET} [{self.current}/{self.total}]", end="")
+            if self.current == self.total:
+                print()
+
+    def inc(self):
+        self.update(self.current + 1)
 
 
 # ============================================================================
@@ -371,16 +362,18 @@ class QBittorrentChecker:
         self.username = instance.get("username", "")
         self.password = instance.get("password", "")
         self.instance_id = instance.get("id")
-        self.instance_name = instance.get("name", "未知")
+        self.instance_name = instance.get("name", "Unknown")
         self.connected = False
+        self.auth_cookies = {}
         self.request_delay = REQUEST_DELAY
         self.batch_delay = BATCH_DELETE_DELAY
         self.api = API_ENDPOINTS
         self.db = db
         self.stats = {"total": 0, "checked": 0, "skipped": 0, "normal": 0, "problematic": 0, "trackers_checked": 0, "start_time": None}
+        self._lock = threading.Lock()
 
     def connect(self) -> bool:
-        spinner = Spinner(f"连接 {self.instance_name} ({self.base_url})")
+        spinner = Spinner(f"Connecting {self.instance_name} ({self.base_url})")
         spinner.start()
         try:
             login_url = urljoin(self.base_url, self.api["login"])
@@ -388,23 +381,30 @@ class QBittorrentChecker:
             response = self.session.post(login_url, data=login_data)
             spinner.stop()
             if response.status_code == 403:
-                print(f"{Colors.RED}{Icon.ERROR} [{self.instance_name}] 用户名或密码错误{Colors.RESET}")
+                print(f"{Colors.RED}[ERROR] [{self.instance_name}] Invalid credentials{Colors.RESET}")
                 return False
             if response.status_code == 200 or "Fails" not in response.text:
                 self.connected = True
-                print(f"{Colors.GREEN}{Icon.SUCCESS} [{self.instance_name}] 连接成功 {Colors.BRIGHT_WHITE}{self.base_url}{Colors.RESET}")
+                self.auth_cookies = self.session.cookies.get_dict()
+                print(f"{Colors.GREEN}[OK] [{self.instance_name}] Connected {Colors.BRIGHT_WHITE}{self.base_url}{Colors.RESET}")
                 return True
             else:
-                print(f"{Colors.RED}{Icon.ERROR} [{self.instance_name}] 登录失败{Colors.RESET}")
+                print(f"{Colors.RED}[ERROR] [{self.instance_name}] Login failed{Colors.RESET}")
                 return False
         except requests.exceptions.ConnectionError:
             spinner.stop()
-            print(f"{Colors.RED}{Icon.ERROR} [{self.instance_name}] 无法连接: {self.base_url}{Colors.RESET}")
+            print(f"{Colors.RED}[ERROR] [{self.instance_name}] Cannot connect: {self.base_url}{Colors.RESET}")
             return False
         except Exception as e:
             spinner.stop()
-            print(f"{Colors.RED}{Icon.ERROR} [{self.instance_name}] 连接异常: {e}{Colors.RESET}")
+            print(f"{Colors.RED}[ERROR] [{self.instance_name}] Exception: {e}{Colors.RESET}")
             return False
+
+    def _make_session(self) -> requests.Session:
+        s = requests.Session()
+        for k, v in self.auth_cookies.items():
+            s.cookies.set(k, v)
+        return s
 
     def get_torrents(self, filter: str = DEFAULT_FILTER) -> List[Dict]:
         try:
@@ -470,133 +470,167 @@ class QBittorrentChecker:
         except Exception:
             return False
 
+    def _check_one_torrent(self, torrent: Dict, force: bool, progress: ProgressBar) -> Optional[Dict]:
+        torrent_name = torrent.get("name", "Unknown")
+        torrent_hash = torrent.get("hash")
+
+        if not force and self.db and self.instance_id:
+            existing = self.db.get_torrent(self.instance_id, torrent_hash)
+            if existing and existing["status"] == "normal":
+                with self._lock:
+                    self.stats["skipped"] += 1
+                    self.stats["normal"] += 1
+                progress.inc()
+                return None
+
+        session = self._make_session()
+        try:
+            url = urljoin(self.base_url, self.api["trackers"])
+            r = session.get(url, params={"hash": torrent_hash})
+            trackers = r.json() if r.status_code == 200 else []
+        except Exception:
+            trackers = []
+
+        if not trackers:
+            progress.inc()
+            return None
+
+        working = 0
+        problematic_trackers = []
+        real_total = 0
+
+        for tracker in trackers:
+            url = tracker.get("url", "")
+            if url.startswith(("**", "****")):
+                continue
+            real_total += 1
+            status = tracker.get("status", -1)
+            msg = tracker.get("msg", "")
+            if status == 2:
+                working += 1
+            else:
+                problematic_trackers.append({"url": url, "status": status, "message": msg})
+
+        with self._lock:
+            self.stats["trackers_checked"] += real_total
+
+        is_problematic = working == 0
+        info = None
+
+        if is_problematic:
+            try:
+                pu = urljoin(self.base_url, self.api["properties"])
+                rp = session.get(pu, params={"hash": torrent_hash})
+                properties = rp.json() if rp.status_code == 200 else {}
+            except Exception:
+                properties = {}
+            try:
+                fu = urljoin(self.base_url, self.api["files"])
+                rf = session.get(fu, params={"hash": torrent_hash})
+                files = rf.json() if rf.status_code == 200 else []
+            except Exception:
+                files = []
+
+            info = {
+                "name": torrent_name,
+                "hash": torrent_hash,
+                "progress": torrent.get("progress", 0) * 100,
+                "state": torrent.get("state", "unknown"),
+                "save_path": properties.get("save_path", "Unknown"),
+                "working_trackers": working,
+                "total_trackers": real_total,
+                "problematic_trackers": problematic_trackers,
+                "files": [f.get("name", "") for f in files]
+            }
+
+        if self.db and self.instance_id:
+            tid = self.db.upsert_torrent(
+                self.instance_id, torrent_hash, torrent_name,
+                "problematic" if is_problematic else "normal",
+                torrent.get("progress", 0) * 100,
+                torrent.get("state", ""),
+                info["save_path"] if info and is_problematic else None
+            )
+            if is_problematic and problematic_trackers and info:
+                for tr in problematic_trackers:
+                    self.db.add_tracker_issue(tid, tr["url"], tr["status"], tr.get("message", ""))
+
+        with self._lock:
+            self.stats["checked"] += 1
+            if is_problematic:
+                self.stats["problematic"] += 1
+            else:
+                self.stats["normal"] += 1
+
+        progress.inc()
+        time.sleep(self.request_delay)
+        return info
+
     def check_tracker_status(self, torrents: List[Dict] = None, force: bool = False) -> List[Dict]:
         if not self.connected:
-            print(f"{Colors.RED}{Icon.ERROR} [{self.instance_name}] 未连接{Colors.RESET}")
+            print(f"{Colors.RED}[ERROR] [{self.instance_name}] Not connected{Colors.RESET}")
             return []
 
         if torrents is None:
             torrents = self.get_torrents()
 
         if not torrents:
-            print(f"{Colors.YELLOW}{Icon.WARNING} [{self.instance_name}] 没有种子{Colors.RESET}")
+            print(f"{Colors.YELLOW}[WARN] [{self.instance_name}] No torrents found{Colors.RESET}")
             return []
 
         self.stats["total"] = len(torrents)
         self.stats["start_time"] = datetime.now()
 
-        print(f"\n{Colors.BRIGHT_CYAN}{Icon.RADAR} [{self.instance_name}] 扫描 {len(torrents)} 个种子{Colors.RESET}")
+        print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] Scanning {len(torrents)} torrents (threads={MAX_WORKERS}){Colors.RESET}")
 
-        problematic_torrents = []
+        problematic = []
         progress = ProgressBar(len(torrents), prefix=f"{Colors.BRIGHT_BLUE}[{self.instance_name}]{Colors.RESET}")
 
-        for i, torrent in enumerate(torrents, 1):
-            torrent_name = torrent.get("name", "未知")
-            torrent_hash = torrent.get("hash")
-            progress.update(i)
-            self.stats["checked"] += 1
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(self._check_one_torrent, t, force, progress): t for t in torrents}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    problematic.append(result)
 
-            # ── 跳过逻辑：如果 DB 中有此种子且状态为 normal，跳过 ──
-            if not force and self.db and self.instance_id:
-                existing = self.db.get_torrent(self.instance_id, torrent_hash)
-                if existing and existing["status"] == "normal":
-                    self.stats["skipped"] += 1
-                    self.stats["normal"] += 1
-                    continue
-
-            trackers = self.get_torrent_trackers(torrent_hash)
-            if not trackers:
-                continue
-
-            working = 0
-            problematic_trackers = []
-            real_total = 0
-
-            for tracker in trackers:
-                url = tracker.get("url", "")
-                if url.startswith(("**", "****")):
-                    continue
-                real_total += 1
-                status = tracker.get("status", -1)
-                msg = tracker.get("msg", "")
-                if status == 2:
-                    working += 1
-                else:
-                    problematic_trackers.append({"url": url, "status": status, "message": msg})
-
-            self.stats["trackers_checked"] += real_total
-            is_problematic = working == 0
-
-            if is_problematic:
-                properties = self.get_torrent_properties(torrent_hash)
-                files = self.get_torrent_contents(torrent_hash)
-                info = {
-                    "name": torrent_name,
-                    "hash": torrent_hash,
-                    "progress": torrent.get("progress", 0) * 100,
-                    "state": torrent.get("state", "unknown"),
-                    "save_path": properties.get("save_path", "未知"),
-                    "working_trackers": working,
-                    "total_trackers": real_total,
-                    "problematic_trackers": problematic_trackers,
-                    "files": [f.get("name", "") for f in files]
-                }
-                problematic_torrents.append(info)
-                self.stats["problematic"] += 1
-            else:
-                self.stats["normal"] += 1
-
-            # 写入 DB
-            if self.db and self.instance_id:
-                tid = self.db.upsert_torrent(
-                    self.instance_id, torrent_hash, torrent_name,
-                    "problematic" if is_problematic else "normal",
-                    torrent.get("progress", 0) * 100,
-                    torrent.get("state", ""),
-                    properties.get("save_path", "") if is_problematic else None
-                )
-                if is_problematic and problematic_trackers:
-                    for tr in problematic_trackers:
-                        self.db.add_tracker_issue(tid, tr["url"], tr["status"], tr.get("message", ""))
-
-            time.sleep(self.request_delay)
-
+        problematic.sort(key=lambda x: x.get("progress", 0))
         print()
         self._print_summary()
-        return problematic_torrents
+        return problematic
 
     def _print_summary(self):
         elapsed = (datetime.now() - self.stats["start_time"]).total_seconds()
-        print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] 报告{Colors.RESET}")
-        print(f"  {Colors.BRIGHT_YELLOW}总数{Colors.RESET}: {self.stats['total']}")
+        rate = self.stats["checked"] / elapsed if elapsed > 0 else 0
+        print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] Report{Colors.RESET}")
+        print(f"  {Colors.BRIGHT_YELLOW}Total{Colors.RESET}: {self.stats['total']}")
         if self.stats["skipped"] > 0:
-            print(f"  {Colors.BRIGHT_BLUE}跳过(已存正常){Colors.RESET}: {self.stats['skipped']}")
-        print(f"  {Colors.BRIGHT_GREEN}正常{Colors.RESET}: {self.stats['normal']}")
-        print(f"  {Colors.BRIGHT_RED}问题{Colors.RESET}: {self.stats['problematic']}")
-        print(f"  {Colors.BRIGHT_MAGENTA}耗时{Colors.RESET}: {elapsed:.2f}s")
+            print(f"  {Colors.BRIGHT_BLUE}Skipped (cached normal){Colors.RESET}: {self.stats['skipped']}")
+        print(f"  {Colors.BRIGHT_GREEN}Normal{Colors.RESET}: {self.stats['normal']}")
+        print(f"  {Colors.BRIGHT_RED}Issues{Colors.RESET}: {self.stats['problematic']}")
+        print(f"  {Colors.BRIGHT_MAGENTA}Time{Colors.RESET}: {elapsed:.2f}s  ({Colors.BRIGHT_CYAN}{rate:.0f} t/s{Colors.RESET})")
 
     def print_problematic_torrents(self, problematic: List[Dict]):
         if not problematic:
-            print(f"\n{Colors.BRIGHT_GREEN}[{self.instance_name}] ✨ 所有种子正常 ✨{Colors.RESET}")
+            print(f"\n{Colors.BRIGHT_GREEN}[{self.instance_name}] All torrents healthy{Colors.RESET}")
             return
-        print(f"\n{Colors.BRIGHT_RED}[{self.instance_name}] {len(problematic)} 个问题种子{Colors.RESET}\n")
+        print(f"\n{Colors.BRIGHT_RED}[{self.instance_name}] {len(problematic)} problematic torrents{Colors.RESET}\n")
         for i, t in enumerate(problematic, 1):
             sc = Colors.BRIGHT_RED if t["progress"] < 100 else Colors.BRIGHT_YELLOW
             print(f"{Colors.BRIGHT_CYAN}[{i:2d}]{Colors.RESET} {Colors.BRIGHT_WHITE}{t['name'][:55]}{Colors.RESET}")
-            print(f"      {Colors.DIM}│{Colors.RESET} 进度: {sc}{t['progress']:.1f}%{Colors.RESET}")
-            print(f"      {Colors.DIM}│{Colors.RESET} 状态: {t['state']}")
-            print(f"      {Colors.DIM}│{Colors.RESET} Tracker: {Colors.RED}0/{t['total_trackers']}{Colors.RESET}")
+            print(f"      {Colors.DIM}|{Colors.RESET} Progress: {sc}{t['progress']:.1f}%{Colors.RESET}")
+            print(f"      {Colors.DIM}|{Colors.RESET} State: {t['state']}")
+            print(f"      {Colors.DIM}|{Colors.RESET} Tracker: {Colors.RED}0/{t['total_trackers']}{Colors.RESET}")
             if t.get("problematic_trackers"):
                 for tr in t["problematic_trackers"][:2]:
                     short = tr["url"][:50]
-                    print(f"        {Colors.RED}✘{Colors.RESET} {short}")
+                    print(f"        {Colors.RED}x{Colors.RESET} {short}")
             print()
 
     def batch_delete_torrents(self, hashes: List[str], delete_files: bool = False):
-        action = "删除文件" if delete_files else "保留文件"
-        print(f"\n{Colors.YELLOW}{Icon.TRASH} [{self.instance_name}] 批量删除 {len(hashes)} 个种子 ({action}){Colors.RESET}")
+        action = "Delete files" if delete_files else "Keep files"
+        print(f"\n{Colors.YELLOW}[{self.instance_name}] Deleting {len(hashes)} torrents ({action}){Colors.RESET}")
         success = 0
-        pb = ProgressBar(len(hashes), prefix=f"{Colors.BRIGHT_RED}删除{Colors.RESET}")
+        pb = ProgressBar(len(hashes), prefix=f"{Colors.BRIGHT_RED}Delete{Colors.RESET}")
         for i, h in enumerate(hashes, 1):
             pb.update(i)
             if self.delete_torrent(h, delete_files):
@@ -606,7 +640,7 @@ class QBittorrentChecker:
                     if t:
                         self.db.update_torrent_status(t["id"], "deleted")
             time.sleep(self.batch_delay)
-        print(f"\n{Colors.GREEN}{Icon.SUCCESS} [{self.instance_name}] 删除完成: {success}/{len(hashes)}{Colors.RESET}")
+        print(f"\n{Colors.GREEN}[OK] [{self.instance_name}] Deleted: {success}/{len(hashes)}{Colors.RESET}")
 
 
 # ============================================================================
@@ -614,77 +648,81 @@ class QBittorrentChecker:
 # ============================================================================
 
 def manage_instances(db: Database):
+    h = Icon.HORIZONTAL
+    v = Icon.VERTICAL
+    w = 60
     while True:
         instances = db.list_instances()
-        print(f"\n{Colors.BRIGHT_CYAN}┌{'─'*60}┐{Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_MAGENTA}{Icon.HDD} 实例管理{Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}├{'─'*60}┤{Colors.RESET}")
+        print()
+        print(f"{Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}")
+        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  Instance Manager")
+        print(f"{Colors.BRIGHT_CYAN}{Icon.LT}{h*w}{Icon.RT}{Colors.RESET}")
         if instances:
             for inst in instances:
-                masked = "*" * len(inst["password"]) if inst["password"] else "(无)"
-                print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}[{inst['id']}]{Colors.RESET} {inst['name']}  {Colors.DIM}{inst['host']}:{inst['port']}  user:{inst['username']}  pass:{masked}{Colors.RESET}")
+                masked = "*" * len(inst["password"]) if inst["password"] else "(none)"
+                print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}[{inst['id']}]{Colors.RESET} {inst['name']}  {Colors.DIM}{inst['host']}:{inst['port']}  user:{inst['username']}  pass:{masked}{Colors.RESET}")
         else:
-            print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.DIM}(暂无实例){Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}├{'─'*60}┤{Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}1{Colors.RESET} 添加实例")
-        print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}2{Colors.RESET} 编辑实例")
-        print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}3{Colors.RESET} 删除实例")
-        print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}0{Colors.RESET} 返回主菜单")
-        print(f"{Colors.BRIGHT_CYAN}└{'─'*60}┘{Colors.RESET}")
-        choice = input(f"\n{Colors.BRIGHT_CYAN}⌂{Colors.RESET} 选择: ").strip()
+            print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}(no instances){Colors.RESET}")
+        print(f"{Colors.BRIGHT_CYAN}{Icon.LT}{h*w}{Icon.RT}{Colors.RESET}")
+        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}1{Colors.RESET} Add instance")
+        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}2{Colors.RESET} Edit instance")
+        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}3{Colors.RESET} Delete instance")
+        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}0{Colors.RESET} Back to menu")
+        print(f"{Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}")
+        choice = input(f"\n{Colors.BRIGHT_CYAN}> {Colors.RESET}Choice: ").strip()
 
         if choice == "0":
             break
         elif choice == "1":
-            name = input(f"  名称: ").strip()
-            host = input(f"  主机: ").strip() or "localhost"
-            port = int(input(f"  端口 [{Colors.DIM}8080{Colors.RESET}]: ").strip() or "8080")
-            user = input(f"  用户名: ").strip()
-            pw = getpass.getpass(f"  密码: ")
+            name = input(f"  Name: ").strip()
+            host = input(f"  Host: ").strip() or "localhost"
+            port = int(input(f"  Port [{Colors.DIM}8080{Colors.RESET}]: ").strip() or "8080")
+            user = input(f"  Username: ").strip()
+            pw = getpass.getpass(f"  Password: ")
             db.save_instance(name, host, port, user, pw)
-            print(f"{Colors.GREEN}{Icon.SUCCESS} 实例 '{name}' 已添加{Colors.RESET}")
+            print(f"{Colors.GREEN}[OK] Instance '{name}' added{Colors.RESET}")
         elif choice == "2":
             if not instances:
                 continue
             try:
-                iid = int(input(f"  要编辑的实例ID: ").strip())
+                iid = int(input(f"  Instance ID to edit: ").strip())
             except ValueError:
                 continue
             inst = db.get_instance(iid)
             if not inst:
-                print(f"{Colors.RED}{Icon.ERROR} 未找到{Colors.RESET}")
+                print(f"{Colors.RED}[ERROR] Not found{Colors.RESET}")
                 continue
-            name = input(f"  名称 [{inst['name']}]: ").strip() or inst["name"]
-            host = input(f"  主机 [{inst['host']}]: ").strip() or inst["host"]
-            port = int(input(f"  端口 [{inst['port']}]: ").strip() or str(inst["port"]))
-            user = input(f"  用户名 [{inst['username']}]: ").strip() or inst["username"]
-            pw_input = getpass.getpass(f"  密码 (留空保留原密码): ")
+            name = input(f"  Name [{inst['name']}]: ").strip() or inst["name"]
+            host = input(f"  Host [{inst['host']}]: ").strip() or inst["host"]
+            port = int(input(f"  Port [{inst['port']}]: ").strip() or str(inst["port"]))
+            user = input(f"  Username [{inst['username']}]: ").strip() or inst["username"]
+            pw_input = getpass.getpass(f"  Password (blank = keep): ")
             pw = pw_input if pw_input else inst["password"]
             db.save_instance(name, host, port, user, pw, inst_id=iid)
-            print(f"{Colors.GREEN}{Icon.SUCCESS} 实例已更新{Colors.RESET}")
+            print(f"{Colors.GREEN}[OK] Instance updated{Colors.RESET}")
         elif choice == "3":
             if not instances:
                 continue
             try:
-                iid = int(input(f"  要删除的实例ID: ").strip())
+                iid = int(input(f"  Instance ID to delete: ").strip())
             except ValueError:
                 continue
-            confirm = input(f"{Colors.YELLOW}  确认删除? 种子记录也将清除 [y/N]: {Colors.RESET}").strip().lower()
+            confirm = input(f"{Colors.YELLOW}  Confirm? Torrent records will also be deleted [y/N]: {Colors.RESET}").strip().lower()
             if confirm in ("y", "yes"):
                 db.delete_instance(iid)
-                print(f"{Colors.GREEN}{Icon.SUCCESS} 已删除{Colors.RESET}")
+                print(f"{Colors.GREEN}[OK] Deleted{Colors.RESET}")
 
 
 def choose_instances(db: Database) -> List[Dict]:
     instances = db.list_instances()
     if not instances:
-        print(f"{Colors.YELLOW}{Icon.WARNING} 没有配置的实例，请先添加{Colors.RESET}")
+        print(f"{Colors.YELLOW}[WARN] No instances configured. Add one first.{Colors.RESET}")
         return []
-    print(f"\n{Colors.BRIGHT_CYAN}选择要检查的实例:{Colors.RESET}")
+    print(f"\n{Colors.BRIGHT_CYAN}Select instances to check:{Colors.RESET}")
     for inst in instances:
         print(f"  {Colors.BRIGHT_GREEN}[{inst['id']}]{Colors.RESET} {inst['name']} ({inst['host']}:{inst['port']})")
-    print(f"  {Colors.BRIGHT_GREEN}[a]{Colors.RESET} 全部")
-    sel = input(f"\n{Colors.BRIGHT_CYAN}⌂{Colors.RESET} 选择 (ID / a): ").strip().lower()
+    print(f"  {Colors.BRIGHT_GREEN}[a]{Colors.RESET} All")
+    sel = input(f"\n{Colors.BRIGHT_CYAN}> {Colors.RESET}Select (ID / a): ").strip().lower()
     if sel == "a":
         return instances
     try:
@@ -702,23 +740,27 @@ def choose_instances(db: Database) -> List[Dict]:
 def show_dashboard(db: Database):
     instances = db.list_instances()
     if not instances:
-        print(f"{Colors.YELLOW}{Icon.WARNING} 暂无实例{Colors.RESET}")
+        print(f"{Colors.YELLOW}[WARN] No instances{Colors.RESET}")
         return
+    h = Icon.HORIZONTAL
+    v = Icon.VERTICAL
+    w = 60
     total_torrents = 0
-    print(f"\n{Colors.BRIGHT_CYAN}┌{'─'*60}┐{Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_MAGENTA}{Icon.DATABASE} 全局统计{Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}├{'─'*60}┤{Colors.RESET}")
+    print()
+    print(f"{Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}")
+    print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  Global Stats")
+    print(f"{Colors.BRIGHT_CYAN}{Icon.LT}{h*w}{Icon.RT}{Colors.RESET}")
     for inst in instances:
         counts = db.count_torrents_by_status(inst["id"])
         sub = sum(counts.values())
         total_torrents += sub
-        print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_WHITE}{inst['name']}{Colors.RESET}")
-        print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}    正常: {counts['normal']}  问题: {counts['problematic']}  未知: {counts['unknown']}  已删: {counts['deleted']}  (共 {sub})")
-    print(f"{Colors.BRIGHT_CYAN}├{'─'*60}┤{Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  数据库路径: {Colors.DIM}{db.db_path}{Colors.RESET}")
-    print(f"{Colors.BRIGHT_CYAN}│{Colors.RESET}  跟踪种子总数: {total_torrents}")
-    print(f"{Colors.BRIGHT_CYAN}└{'─'*60}┘{Colors.RESET}")
-    input(f"\n{Colors.DIM}按 Enter 返回...{Colors.RESET}")
+        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_WHITE}{inst['name']}{Colors.RESET}")
+        print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}    Normal: {counts['normal']}  Issues: {counts['problematic']}  Unknown: {counts['unknown']}  Deleted: {counts['deleted']}  (total: {sub})")
+    print(f"{Colors.BRIGHT_CYAN}{Icon.LT}{h*w}{Icon.RT}{Colors.RESET}")
+    print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  DB path: {Colors.DIM}{db.db_path}{Colors.RESET}")
+    print(f"{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  Total torrents tracked: {total_torrents}")
+    print(f"{Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}")
+    input(f"\n{Colors.DIM}Press Enter to return...{Colors.RESET}")
 
 
 # ============================================================================
@@ -726,41 +768,45 @@ def show_dashboard(db: Database):
 # ============================================================================
 
 def print_banner():
-    banner = f"""
-{Colors.BRIGHT_CYAN}┌{'─'*70}┐{Colors.RESET}
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_MAGENTA}{Icon.BOLT} TRACKER GUARDIAN v4.0{Colors.RESET} - 多实例持久化智能检测系统
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.DIM}{Icon.SHIELD} 多实例  |  {Icon.DATABASE} SQLite持久化  |  {Icon.LOOP} 增量跳过  |  {Icon.RADAR} 智能扫描{Colors.RESET}
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.DIM}{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}
-{Colors.BRIGHT_CYAN}└{'─'*70}┘{Colors.RESET}
-"""
-    print(banner)
+    h = Icon.HORIZONTAL
+    v = Icon.VERTICAL
+    w = 70
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"""
+{Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_MAGENTA}TRACKER GUARDIAN v4.0.1{Colors.RESET} - Multi-Instance Persistent Scanner
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}Multi-instance | SQLite | Incremental skip | Concurrent scan{Colors.RESET}
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}{now}{Colors.RESET}
+{Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}
+""")
 
 
 def main_menu(db: Database):
     while True:
         instances = db.list_instances()
         inst_count = len(instances)
-        counts = db.count_torrents_by_status()
+        h = Icon.HORIZONTAL
+        v = Icon.VERTICAL
+        w = 50
 
         print_banner()
         menu = f"""
-{Colors.BRIGHT_CYAN}┌{'─'*50}┐{Colors.RESET}
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_MAGENTA}{Icon.TERMINAL} 主菜单{Colors.RESET}
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.DIM}{'─'*44}{Colors.RESET}
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}1{Colors.RESET} {Icon.RADAR} 检查 Tracker (增量 — 跳过已知正常)
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}2{Colors.RESET} {Icon.BOLT} 强制检查 (忽略缓存)
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}3{Colors.RESET} {Icon.HDD} 管理实例 ({inst_count})
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}4{Colors.RESET} {Icon.DATABASE} 全局统计
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.DIM}{'─'*44}{Colors.RESET}
-{Colors.BRIGHT_CYAN}│{Colors.RESET}  {Colors.BRIGHT_GREEN}0{Colors.RESET} 退出
-{Colors.BRIGHT_CYAN}└{'─'*50}┘{Colors.RESET}
+{Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  Main Menu
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}{'-'*44}{Colors.RESET}
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}1{Colors.RESET} Check tracker (incremental)
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}2{Colors.RESET} Force check (ignore cache)
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}3{Colors.RESET} Manage instances ({inst_count})
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}4{Colors.RESET} Global stats
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.DIM}{'-'*44}{Colors.RESET}
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {Colors.BRIGHT_GREEN}0{Colors.RESET} Exit
+{Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}
 """
         print(menu)
-
-        choice = input(f"{Colors.BRIGHT_CYAN}⌂{Colors.RESET} 选择 [0-4]: ").strip()
+        choice = input(f"{Colors.BRIGHT_CYAN}> {Colors.RESET}Choice [0-4]: ").strip()
 
         if choice == "0":
-            print(f"\n{Colors.BRIGHT_MAGENTA}感谢使用 TRACKER GUARDIAN v4.0！{Colors.RESET}\n")
+            print(f"\n{Colors.BRIGHT_MAGENTA}Thanks for using TRACKER GUARDIAN v4.0.1!{Colors.RESET}\n")
             break
 
         elif choice in ("1", "2"):
@@ -776,17 +822,17 @@ def main_menu(db: Database):
                 problematic = checker.check_tracker_status(torrents, force=force)
                 checker.print_problematic_torrents(problematic)
 
-                if problematic and input(f"\n  对 [{inst['name']}] 的问题种子执行操作? [y/N]: ").strip().lower() in ("y", "yes"):
-                    print(f"    1. 重新宣布")
-                    print(f"    2. 删除 (保留文件)")
-                    print(f"    3. 删除及文件")
-                    print(f"    4. 暂停")
-                    print(f"    5. 恢复")
-                    action = input(f"    选择 [1-5]: ").strip()
+                if problematic and input(f"\n  Act on [{inst['name']}] problematic torrents? [y/N]: ").strip().lower() in ("y", "yes"):
+                    print(f"    1. Re-announce")
+                    print(f"    2. Delete (keep files)")
+                    print(f"    3. Delete with files")
+                    print(f"    4. Pause")
+                    print(f"    5. Resume")
+                    action = input(f"    Choose [1-5]: ").strip()
                     if action == "1":
                         for t in problematic:
                             checker.force_reannounce(t["hash"])
-                        print(f"  {Colors.GREEN}{Icon.SUCCESS} 已重新宣布{Colors.RESET}")
+                        print(f"  {Colors.GREEN}[OK] Re-announced{Colors.RESET}")
                     elif action == "2":
                         checker.batch_delete_torrents([t["hash"] for t in problematic], delete_files=False)
                     elif action == "3":
@@ -794,12 +840,12 @@ def main_menu(db: Database):
                     elif action == "4":
                         for t in problematic:
                             checker.pause_torrent(t["hash"])
-                        print(f"  {Colors.YELLOW}⏸ 已暂停{Colors.RESET}")
+                        print(f"  {Colors.YELLOW}Paused{Colors.RESET}")
                     elif action == "5":
                         for t in problematic:
                             checker.resume_torrent(t["hash"])
-                        print(f"  {Colors.GREEN}▶ 已恢复{Colors.RESET}")
-            input(f"\n{Colors.DIM}按 Enter 继续...{Colors.RESET}")
+                        print(f"  {Colors.GREEN}Resumed{Colors.RESET}")
+            input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
 
         elif choice == "3":
             manage_instances(db)
@@ -813,9 +859,9 @@ def main():
     try:
         main_menu(db)
     except KeyboardInterrupt:
-        print(f"\n\n{Colors.YELLOW}{Icon.WARNING} 用户中断{Colors.RESET}")
+        print(f"\n\n{Colors.YELLOW}[WARN] Interrupted{Colors.RESET}")
     except Exception as e:
-        print(f"\n{Colors.RED}{Icon.ERROR} 异常: {e}{Colors.RESET}")
+        print(f"\n{Colors.RED}[ERROR] {e}{Colors.RESET}")
     finally:
         db.close()
 
