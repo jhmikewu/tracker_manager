@@ -468,68 +468,68 @@ class QBittorrentChecker:
         except Exception:
             return False
 
-    def _check_one_torrent(self, torrent: Dict) -> Optional[Dict]:
+    def _check_batch(self, batch: List[Dict]) -> List[Dict]:
         session = self._make_session()
-        torrent_name = torrent.get("name", "Unknown")
-        torrent_hash = torrent.get("hash")
+        results = []
+        for torrent in batch:
+            torrent_name = torrent.get("name", "Unknown")
+            torrent_hash = torrent.get("hash")
 
-        try:
-            url = urljoin(self.base_url, self.api["trackers"])
-            r = session.get(url, params={"hash": torrent_hash})
-            trackers = r.json() if r.status_code == 200 else []
-        except Exception:
-            trackers = []
+            try:
+                url = urljoin(self.base_url, self.api["trackers"])
+                r = session.get(url, params={"hash": torrent_hash})
+                trackers = r.json() if r.status_code == 200 else []
+            except Exception:
+                trackers = []
 
-        if not trackers:
-            return None
-
-        working = 0
-        problematic_trackers = []
-        real_total = 0
-
-        for tracker in trackers:
-            url = tracker.get("url", "")
-            if url.startswith(("**", "****")):
+            if not trackers:
                 continue
-            real_total += 1
-            status = tracker.get("status", -1)
-            msg = tracker.get("msg", "")
-            if status == 2:
-                working += 1
-            else:
-                problematic_trackers.append({"url": url, "status": status, "message": msg})
 
-        if working > 0:
-            return {"hash": torrent_hash, "name": torrent_name, "is_problematic": False,
-                    "progress": torrent.get("progress", 0) * 100, "state": torrent.get("state", ""),
-                    "tracker_count": real_total}
+            working = 0
+            problematic_trackers = []
+            real_total = 0
 
-        try:
-            pu = urljoin(self.base_url, self.api["properties"])
-            rp = session.get(pu, params={"hash": torrent_hash})
-            properties = rp.json() if rp.status_code == 200 else {}
-        except Exception:
-            properties = {}
-        try:
-            fu = urljoin(self.base_url, self.api["files"])
-            rf = session.get(fu, params={"hash": torrent_hash})
-            files = rf.json() if rf.status_code == 200 else []
-        except Exception:
-            files = []
+            for tracker in trackers:
+                url = tracker.get("url", "")
+                if url.startswith(("**", "****")):
+                    continue
+                real_total += 1
+                status = tracker.get("status", -1)
+                msg = tracker.get("msg", "")
+                if status == 2:
+                    working += 1
+                else:
+                    problematic_trackers.append({"url": url, "status": status, "message": msg})
 
-        return {
-            "hash": torrent_hash,
-            "name": torrent_name,
-            "is_problematic": True,
-            "progress": torrent.get("progress", 0) * 100,
-            "state": torrent.get("state", "unknown"),
-            "save_path": properties.get("save_path", "Unknown"),
-            "working_trackers": working,
-            "total_trackers": real_total,
-            "problematic_trackers": problematic_trackers,
-            "files": [f.get("name", "") for f in files],
-            "tracker_count": real_total
-        }
+            if working > 0:
+                results.append({"hash": torrent_hash, "name": torrent_name, "is_problematic": False,
+                               "progress": torrent.get("progress", 0) * 100, "state": torrent.get("state", ""),
+                               "tracker_count": real_total})
+                continue
+
+            try:
+                pu = urljoin(self.base_url, self.api["properties"])
+                rp = session.get(pu, params={"hash": torrent_hash})
+                properties = rp.json() if rp.status_code == 200 else {}
+            except Exception:
+                properties = {}
+            try:
+                fu = urljoin(self.base_url, self.api["files"])
+                rf = session.get(fu, params={"hash": torrent_hash})
+                files = rf.json() if rf.status_code == 200 else []
+            except Exception:
+                files = []
+
+            results.append({
+                "hash": torrent_hash, "name": torrent_name, "is_problematic": True,
+                "progress": torrent.get("progress", 0) * 100, "state": torrent.get("state", "unknown"),
+                "save_path": properties.get("save_path", "Unknown"),
+                "working_trackers": working, "total_trackers": real_total,
+                "problematic_trackers": problematic_trackers,
+                "files": [f.get("name", "") for f in files], "tracker_count": real_total
+            })
+            time.sleep(self.request_delay)
+        return results
 
     def check_tracker_status(self, torrents: List[Dict] = None, force: bool = False) -> List[Dict]:
         if not self.connected:
@@ -556,39 +556,48 @@ class QBittorrentChecker:
                     continue
             to_check.append(t)
 
-        print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] {len(torrents)} torrents ({len(to_check)} to check, {self.stats['skipped']} skipped, threads={MAX_WORKERS}){Colors.RESET}")
+        n = len(to_check)
+        if n == 0:
+            print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] All {self.stats['total']} torrents skipped (cached OK){Colors.RESET}")
+            print()
+            self._print_summary()
+            return []
+
+        print(f"\n{Colors.BRIGHT_CYAN}[{self.instance_name}] {self.stats['total']} torrents ({n} to check, {self.stats['skipped']} skipped, {MAX_WORKERS} workers, {REQUEST_DELAY*1000:.0f}ms delay){Colors.RESET}")
+
+        chunk_size = max(1, n // MAX_WORKERS + 1)
+        chunks = [to_check[i:i+chunk_size] for i in range(0, n, chunk_size)]
 
         problematic = []
-        progress = ProgressBar(len(to_check), prefix=f"{Colors.BRIGHT_BLUE}[{self.instance_name}]{Colors.RESET}")
+        progress = ProgressBar(n, prefix=f"{Colors.BRIGHT_BLUE}[{self.instance_name}]{Colors.RESET}")
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(self._check_one_torrent, t): t for t in to_check}
+        with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+            futures = [pool.submit(self._check_batch, c) for c in chunks]
             done = 0
             for future in as_completed(futures):
-                done += 1
-                progress.update(done)
-                result = future.result()
-                if result is None:
-                    continue
-                if result["is_problematic"]:
-                    problematic.append(result)
-                if self.db and self.instance_id:
-                    tid = self.db.upsert_torrent(
-                        self.instance_id, result["hash"], result["name"],
-                        "problematic" if result["is_problematic"] else "normal",
-                        result["progress"], result.get("state", ""),
-                        result.get("save_path") if result["is_problematic"] else None
-                    )
-                    if result["is_problematic"] and result.get("problematic_trackers"):
-                        for tr in result["problematic_trackers"]:
-                            self.db.add_tracker_issue(tid, tr["url"], tr["status"], tr.get("message", ""))
-                self.stats["checked"] += 1
-                self.stats["trackers_checked"] += result.get("tracker_count", 0)
-                if result["is_problematic"]:
-                    self.stats["problematic"] += 1
-                else:
-                    self.stats["normal"] += 1
-                time.sleep(self.request_delay)
+                for result in future.result():
+                    done += 1
+                    progress.update(done)
+                    if result is None:
+                        continue
+                    if result["is_problematic"]:
+                        problematic.append(result)
+                    if self.db and self.instance_id:
+                        tid = self.db.upsert_torrent(
+                            self.instance_id, result["hash"], result["name"],
+                            "problematic" if result["is_problematic"] else "normal",
+                            result["progress"], result.get("state", ""),
+                            result.get("save_path") if result["is_problematic"] else None
+                        )
+                        if result["is_problematic"] and result.get("problematic_trackers"):
+                            for tr in result["problematic_trackers"]:
+                                self.db.add_tracker_issue(tid, tr["url"], tr["status"], tr.get("message", ""))
+                    self.stats["checked"] += 1
+                    self.stats["trackers_checked"] += result.get("tracker_count", 0)
+                    if result["is_problematic"]:
+                        self.stats["problematic"] += 1
+                    else:
+                        self.stats["normal"] += 1
 
         print()
         self._print_summary()
