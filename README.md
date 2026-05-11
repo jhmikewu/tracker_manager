@@ -1,55 +1,56 @@
 # Tracker Guardian
 
-Multi-instance qBittorrent tracker status checker with SQLite persistence and concurrent scanning.
+多实例 qBittorrent Tracker 状态检测工具，支持 SQLite 持久化和并发扫描。
 
-## Usage
+## 使用方法
 
 ```bash
 docker run -it --rm -v tracker_data:/data ghcr.io/jhmikewu/tracker_manager
 ```
 
-First run: add your qBittorrent instances via menu option **3**.
+首次运行：通过菜单 **3. 管理实例** 添加你的 qBittorrent 实例。
 
-## What counts as "problematic"?
+## 问题种子判定规则
 
-The tool queries each torrent's trackers via the qBittorrent Web API. Each tracker has a status code:
+工具通过 qBittorrent Web API 查询每个种子的 Tracker 状态。每个 Tracker 的状态码含义如下：
 
-| Status | Meaning | Classification |
-|--------|---------|---------------|
-| `2` | Working (contacted successfully) | **Working** |
-| `4` | Working (encrypted connection) | **Working** |
-| `1` | Not contacted yet | **Ignored** — tracker hasn't been queried yet, usually resolves on next announce |
-| `3` | Updating | **Ignored** — transient state |
-| `0` | Disabled | **Failing** — tracker is disabled |
-| `-1` / other | Error | **Failing** |
+| 状态码 | 含义 | 分类 |
+|--------|------|------|
+| `2` | 正常通信 | **正常** |
+| `4` | 正常通信（加密连接） | **正常** |
+| `1` | 尚未联络 | **忽略** — 还未查询到该 Tracker，通常下次 announce 后会自动恢复 |
+| `3` | 正在更新 | **忽略** — 临时状态 |
+| `0` | 已禁用 | **异常** — Tracker 被禁用 |
+| `-1` / 其他 | 错误 | **异常** |
 
-### Per-tracker logic
+### 单 Tracker 判断
 
-- Trackers with URLs starting with `**` or `****` (DHT, PEX, LSD) are always skipped.
-- A tracker is "failing" only if its status is `0`, `-1`, or any unrecognized value.
-- Status `1` (not contacted) and `3` (updating) are **ignored** — they do not count as working or failing.
+- 以 `**` 或 `****` 开头的 URL（DHT、PEX、LSD）始终跳过。
+- 只有状态码为 `0`、`-1` 或无法识别的值才记为 **异常**。
+- 状态码 `1`（尚未联络）和 `3`（正在更新）被 **忽略** — 不计入正常也不计入异常。
 
-### Per-torrent logic
+### 单种子判断
 
-A torrent is flagged as **problematic** only if **both** conditions are true:
+一个种子被标记为 **问题种子**，必须同时满足两个条件：
 
-1. **Zero** working trackers (no status 2 or 4)
-2. **At least one** genuinely failing tracker (status 0, -1, or error)
+1. **零个** 正常 Tracker（没有状态码 2 或 4）
+2. **至少一个** 明确异常的 Tracker（状态码 0、-1 或错误信息）
 
-If ALL of a torrent's trackers are status 1 (not contacted yet), it is **not** flagged. If at least one tracker is working, it is **not** flagged — the torrent is considered healthy regardless of other failing trackers.
+如果某个种子的所有 Tracker 都处于状态 1（尚未联络），则 **不会** 标记为问题。只要有一个 Tracker 正常工作，该种子就视为健康。
 
-## Menu options
+## 菜单功能
 
-1. **Check tracker (incremental)** — Skips torrents previously marked as normal in the DB
-2. **Force check** — Re-checks every torrent regardless of cached status
-3. **Manage instances** — Add/edit/delete qBittorrent connection profiles
-4. **Global stats** — Summary of tracked torrents across all instances
-5. **Find cross-instance duplicates** — Detects torrents with identical hashes across multiple instances and lets you keep only one copy (files are hardlinked, so deletion is safe)
+1. **检查 Tracker（增量）** — 跳过数据库中已标记为正常的种子
+2. **强制检查（忽略缓存）** — 重新检查所有种子
+3. **管理实例** — 添加/编辑/删除 qBittorrent 连接配置
+4. **全局统计** — 所有实例的跟踪种子汇总
+5. **跨实例去重** — 检测多个实例中的重复种子（相同 infohash），可选择保留一个实例的副本，其他删除（文件为硬链接，删除安全）
+6. **语言 / Language** — 切换中/英文界面
 
-## Volumes
+## 持久化存储
 
-| Path | Purpose |
-|------|---------|
-| `/data` | SQLite database (instances, torrent history, tracker issues) |
+| 路径 | 用途 |
+|------|------|
+| `/data` | SQLite 数据库（实例配置、种子历史、Tracker 异常记录） |
 
-Set `GUARDIAN_DB` env var to customise the database path.
+可通过环境变量 `GUARDIAN_DB` 自定义数据库路径。
