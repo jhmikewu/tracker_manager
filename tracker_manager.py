@@ -795,10 +795,11 @@ def main_menu(db: Database):
   {Colors.BRIGHT_GREEN}2{Colors.RESET} Force check (ignore cache)
   {Colors.BRIGHT_GREEN}3{Colors.RESET} Manage instances ({inst_count})
   {Colors.BRIGHT_GREEN}4{Colors.RESET} Global stats
+  {Colors.BRIGHT_GREEN}5{Colors.RESET} Find cross-instance duplicates
   {Colors.BRIGHT_GREEN}0{Colors.RESET} Exit
 """
         print(menu)
-        choice = input(f"> Choice [0-4]: ").strip()
+        choice = input(f"> Choice [0-5]: ").strip()
 
         if choice == "0":
             print(f"\nExiting.\n")
@@ -849,6 +850,71 @@ def main_menu(db: Database):
 
         elif choice == "4":
             show_dashboard(db)
+
+        elif choice == "5":
+            instances = db.list_instances()
+            if len(instances) < 2:
+                print("Need at least 2 instances to find duplicates")
+                continue
+            find_cross_instance_duplicates(db, instances)
+            input("\nPress Enter to continue...")
+
+
+def find_cross_instance_duplicates(db: Database, instances: List[Dict]):
+    by_hash: Dict[str, List[Dict]] = {}
+    for inst in instances:
+        checker = QBittorrentChecker(inst, db)
+        if not checker.connect():
+            continue
+        print(f"Fetching torrents from {inst['name']}...")
+        torrents = checker.get_torrents()
+        for t in torrents:
+            h = t.get("hash")
+            if not h:
+                continue
+            by_hash.setdefault(h, []).append({
+                "inst": inst,
+                "name": t.get("name", "?"),
+                "size": t.get("size", 0),
+                "hash": h,
+                "checker": checker
+            })
+
+    dups = {h: entries for h, entries in by_hash.items() if len(entries) > 1}
+    if not dups:
+        print("No cross-instance duplicates found.")
+        return
+
+    print(f"\nFound {len(dups)} torrents duplicated across instances.\n")
+    print("Instances:")
+    for i, inst in enumerate(instances, 1):
+        counts = sum(1 for e in dups.values() if any(x["inst"]["id"] == inst["id"] for x in e))
+        print(f"  [{i}] {inst['name']} ({counts} duplicates)")
+    print()
+
+    sel = input("Keep torrents on which instance? [1]: ").strip()
+    try:
+        keep_idx = int(sel) - 1 if sel else 0
+        keep_inst = instances[keep_idx]
+    except (ValueError, IndexError):
+        print("Invalid, defaulting to first instance.")
+        keep_inst = instances[0]
+
+    deleted = 0
+    skipped_local = 0
+    for h, entries in dups.items():
+        for e in entries:
+            if e["inst"]["id"] == keep_inst["id"]:
+                skipped_local += 1
+                continue
+            if e["checker"].delete_torrent(h, delete_files=False):
+                deleted += 1
+                if db:
+                    t = db.get_torrent(e["inst"]["id"], h)
+                    if t:
+                        db.update_torrent_status(t["id"], "deleted")
+
+    print(f"Kept {skipped_local} entries on {keep_inst['name']}, deleted {deleted} from others (files retained).")
 
 
 def main():
