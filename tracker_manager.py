@@ -3,7 +3,7 @@
 
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════╗
-║                    Tracker Guardian v4.0.1 - 多实例持久化版                          ║
+║                    Tracker Guardian v4.1 - 多实例持久化版                             ║
 ║            Multi-Instance Tracker Guardian System - 赛博朋克版                        ║
 ╚══════════════════════════════════════════════════════════════════════════════════════╝
 """
@@ -740,7 +740,7 @@ def print_banner():
     h = Icon.HORIZONTAL; v = Icon.VERTICAL; w = 70
     print(f"""
 {Colors.BRIGHT_CYAN}{Icon.TL}{h*w}{Icon.TR}{Colors.RESET}
-{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  TRACKER GUARDIAN v4.0.1  -  {_("多实例 Tracker 扫描器", "Multi-Instance Tracker Scanner")}
+{Colors.BRIGHT_CYAN}{v}{Colors.RESET}  TRACKER GUARDIAN v4.1  -  {_("多实例 Tracker 扫描器", "Multi-Instance Tracker Scanner")}
 {Colors.BRIGHT_CYAN}{v}{Colors.RESET}  {now}
 {Colors.BRIGHT_CYAN}{Icon.BL}{h*w}{Icon.BR}{Colors.RESET}
 """)
