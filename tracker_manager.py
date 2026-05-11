@@ -504,7 +504,7 @@ class QBittorrentChecker:
             if working > 0:
                 results.append({"hash": torrent_hash, "name": torrent_name, "is_problematic": False,
                                "progress": torrent.get("progress", 0) * 100, "state": torrent.get("state", ""),
-                               "tracker_count": real_total})
+                               "size": torrent.get("size", 0), "tracker_count": real_total})
                 continue
 
             try:
@@ -523,6 +523,7 @@ class QBittorrentChecker:
             results.append({
                 "hash": torrent_hash, "name": torrent_name, "is_problematic": True,
                 "progress": torrent.get("progress", 0) * 100, "state": torrent.get("state", "unknown"),
+                "size": torrent.get("size", 0),
                 "save_path": properties.get("save_path", "Unknown"),
                 "working_trackers": working, "total_trackers": real_total,
                 "problematic_trackers": problematic_trackers,
@@ -614,6 +615,14 @@ class QBittorrentChecker:
         print(f"  {Colors.BRIGHT_RED}Issues{Colors.RESET}: {self.stats['problematic']}")
         print(f"  {Colors.BRIGHT_MAGENTA}Time{Colors.RESET}: {elapsed:.2f}s  ({Colors.BRIGHT_CYAN}{rate:.0f} t/s{Colors.RESET})")
 
+    @staticmethod
+    def _fmt_size(size: int) -> str:
+        for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+            if abs(size) < 1024:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size:.1f} PiB"
+
     def print_problematic_torrents(self, problematic: List[Dict]):
         if not problematic:
             print(f"\n{Colors.BRIGHT_GREEN}[{self.instance_name}] All torrents healthy{Colors.RESET}")
@@ -622,13 +631,12 @@ class QBittorrentChecker:
         for i, t in enumerate(problematic, 1):
             sc = Colors.BRIGHT_RED if t["progress"] < 100 else Colors.BRIGHT_YELLOW
             print(f"{Colors.BRIGHT_CYAN}[{i:2d}]{Colors.RESET} {Colors.BRIGHT_WHITE}{t['name'][:55]}{Colors.RESET}")
-            print(f"      {Colors.DIM}|{Colors.RESET} Progress: {sc}{t['progress']:.1f}%{Colors.RESET}")
-            print(f"      {Colors.DIM}|{Colors.RESET} State: {t['state']}")
-            print(f"      {Colors.DIM}|{Colors.RESET} Tracker: {Colors.RED}0/{t['total_trackers']}{Colors.RESET}")
+            print(f"      {Colors.DIM}|{Colors.RESET} Size: {self._fmt_size(t['size'])}  Progress: {sc}{t['progress']:.1f}%{Colors.RESET}  State: {t['state']}")
             if t.get("problematic_trackers"):
-                for tr in t["problematic_trackers"][:2]:
+                for tr in t["problematic_trackers"][:3]:
                     short = tr["url"][:50]
-                    print(f"        {Colors.RED}x{Colors.RESET} {short}")
+                    reason = tr.get("message") or f"status={tr['status']}"
+                    print(f"        {Colors.RED}x{Colors.RESET} {short}  {Colors.DIM}({reason}){Colors.RESET}")
             print()
 
     def batch_delete_torrents(self, hashes: List[str], delete_files: bool = False):
